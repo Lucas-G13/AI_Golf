@@ -5,11 +5,11 @@ a golf club.
 
 ## Where it's at
 
-`main.py` builds the physical side of the problem: a full-body humanoid golfer
-holding a driver with both hands, at address to a teed ball, and swings it
-through a scripted reference swing. The swing is a placeholder — learning a good
-one is the actual project. What matters here is that the body, the club and the
-measurement are right.
+The `golf` package builds the physical side of the problem: a full-body
+humanoid golfer holding a driver with both hands, at address to a teed ball,
+and swings it through a scripted reference swing. The swing is a placeholder —
+learning a good one is the actual project. What matters here is that the body,
+the club and the measurement are right.
 
 ```bash
 python main.py                  # 3D viewer, quarter-speed swing
@@ -17,6 +17,27 @@ python main.py --report         # headless, prints the kinematic report
 python main.py --csv swing.csv  # log every tracked joint every 2 ms
 python main.py --xml golf.xml   # dump the generated MJCF
 ```
+
+## Layout
+
+| file | what's in it |
+| --- | --- |
+| `main.py` | CLI only |
+| `golf/anthropometry.py` | how big the golfer is (Winter 2009 proportions) |
+| `golf/equipment.py` | the club, ball and tee |
+| `golf/joints.py` | every joint, its limits and strength; the address pose |
+| `golf/landmarks.py` | what gets measured, and the kinematic chain |
+| `golf/model.py` | generates the MJCF |
+| `golf/tracking.py` | `SwingTracker` — reading the body |
+| `golf/swing.py` | the scripted keyframes and their interpolation |
+| `golf/ik.py` | inverse kinematics against the live model |
+| `golf/posture.py` | getting the golfer to address |
+| `golf/planner.py` | turning the script into a swing that works |
+| `golf/sim.py` | `GolfSwingSim` — ties it together |
+| `golf/report.py` | running a swing, logging it, showing it |
+
+`GolfSwingSim` is composed from the `ik`, `posture` and `planner` mixins: three
+separate concerns, one object, because they all work on the same model.
 
 ## The model
 
@@ -66,7 +87,8 @@ release. Finding a swing that does is the RL problem.
 ## Next
 
 * Gymnasium environment wrapping `GolfSwingSim` (observation from
-  `SwingTracker.observation()`, action = the 36 servo targets)
+  `SwingTracker.observation()`, action = the 36 servo targets) — likely
+  `golf/env.py`, with training scripts alongside it
 * Reward on ball speed / launch conditions, with penalties for joint-limit and
   torque saturation
 * Train with SB3 (already in the venv alongside MuJoCo and torch)
