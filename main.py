@@ -1,9 +1,17 @@
 """Command-line front end for the golf swing model.
 
+Watch the scripted reference swing:
+
     python main.py                  # 3D viewer, quarter-speed swing
     python main.py --report         # headless, print the kinematic report
     python main.py --csv swing.csv  # log every tracked joint every 2 ms
     python main.py --xml golf.xml   # dump the generated MJCF and exit
+
+Watch a swing the agent learned:
+
+    python main.py --policy runs/golf
+    python main.py --policy runs/golf --report --episodes 50
+    python main.py --policy runs/golf --frames swing.png
 
 The model itself lives in the `golf` package -- start with `golf/__init__.py`.
 """
@@ -16,6 +24,9 @@ import mujoco
 
 from golf import (Anthropometry, Club, GolfSwingSim, print_model_summary,
                   print_report, run_swing, view_swing)
+from golf.env import EpisodeSpec, GolfEnv
+from golf.policy import (TrainedSwing, contact_sheet, report, scripted_swing,
+                         watch)
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +58,16 @@ def parse_args() -> argparse.Namespace:
     swing.add_argument("--no-calibrate", action="store_true",
                        help="skip the tuning swings and ball placement")
 
+    learned = ap.add_argument_group("trained policy")
+    learned.add_argument("--policy", default=None,
+                         help="play a swing trained by train.py, e.g. runs/golf")
+    learned.add_argument("--episodes", type=int, default=20,
+                         help="swings to average over with --policy --report")
+    learned.add_argument("--frames", default=None,
+                         help="write a strip of the swing's phases to this PNG")
+    learned.add_argument("--stochastic", action="store_true",
+                         help="sample actions instead of playing the mean one")
+
     out = ap.add_argument_group("output")
     out.add_argument("--slowmo", type=float, default=0.25,
                      help="viewer playback rate (0.25 = quarter speed)")
@@ -60,12 +81,38 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
+def play_learned(args, anthro: Anthropometry, club: Club) -> None:
+    """Watch, measure or photograph a swing the agent learned."""
+    env = GolfEnv(episode=EpisodeSpec(start="address"), anthro=anthro,
+                  club=club, base=args.base)
+    if args.policy == "reference":
+        act, what = scripted_swing(env), "scripted reference swing"
+    else:
+        swing = TrainedSwing(args.policy, env)
+        swing.deterministic = not args.stochastic
+        act, what = swing.act, str(swing)
+    print(f"playing: {what}")
+
+    if args.frames:
+        contact_sheet(env, act, args.frames)
+    elif args.report or args.no_view:
+        report(env, act, episodes=args.episodes)
+    else:
+        print("\nviewer -- drag to orbit, scroll to zoom, Esc to quit")
+        watch(env, act, slowmo=args.slowmo)
+
+
 def main() -> None:
     args = parse_args()
 
     anthro = Anthropometry(height=args.height, mass=args.mass,
                            handedness=args.hand)
     club = Club(length=args.club_length)
+
+    if args.policy:
+        print("building model ...")
+        play_learned(args, anthro, club)
+        return
 
     print("building model ...")
     sim = GolfSwingSim(anthro, club, base=args.base, timestep=args.timestep,

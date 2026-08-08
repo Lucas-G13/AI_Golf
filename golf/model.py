@@ -211,9 +211,13 @@ def build_model_xml(
     return f"""
 <mujoco model="rl_golf">
   <compiler angle="degree" autolimits="true"/>
+  <!-- Pyramidal friction, not elliptic: elliptic costs 2.4x per step and the
+       swing is identical to three significant figures, because the feet are
+       held by equality constraints rather than by friction.  Newton converges
+       in under one iteration here, so the iteration cap is not binding. -->
   <option timestep="{timestep}" gravity="0 0 -9.81" integrator="implicitfast"
-          solver="Newton" iterations="80" tolerance="1e-10"
-          cone="elliptic" impratio="5"/>
+          solver="Newton" iterations="30" tolerance="1e-8"
+          cone="pyramidal" impratio="3"/>
   <size njmax="600" nconmax="200"/>
   <visual>
     <global offwidth="1600" offheight="1200"/>

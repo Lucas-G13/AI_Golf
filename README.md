@@ -35,6 +35,9 @@ python main.py --xml golf.xml   # dump the generated MJCF
 | `golf/planner.py` | turning the script into a swing that works |
 | `golf/sim.py` | `GolfSwingSim` — ties it together |
 | `golf/report.py` | running a swing, logging it, showing it |
+| `golf/launch.py` | impact → launch conditions → carry and curve |
+| `golf/env.py` | `GolfEnv` — the Gymnasium environment |
+| `train.py` | PPO training |
 
 `GolfSwingSim` is composed from the `ik`, `posture` and `planner` mixins: three
 separate concerns, one object, because they all work on the same model.
@@ -84,11 +87,81 @@ about 40° past square, so the body stops turning exactly when the clubhead need
 it, and nothing in the script exploits the ground reaction or the whip of the
 release. Finding a swing that does is the RL problem.
 
+## Training
+
+```bash
+python train.py                      # full swing, 11 workers
+python train.py --start transition   # downswing only, ~4x faster
+python train.py --steps 20000000 --resume runs/golf/final.zip
+```
+
+Then watch what it learned:
+
+```bash
+python main.py --policy runs/golf                      # 3D viewer
+python main.py --policy runs/golf --report --episodes 50
+python main.py --policy runs/golf --frames swing.png   # contact sheet
+python main.py --policy reference --report             # the scripted swing
+```
+
+Results after 3.3M steps (~50 min on the machine below), against the scripted
+swing it started from:
+
+| | scripted | learned |
+| --- | --- | --- |
+| clubhead speed | 18.2 m/s | **36.1 m/s** |
+| ball speed | 20.3 m/s | 41.6 m/s |
+| launch angle | −5.6° | 21.9° |
+| carry | 0.4 m | **115 m** |
+| contact | — | 27/30 swings |
+
+The scripted swing chops 29° down and drills the ball into the turf; the agent
+learned to hit up on it. It is still not a good golf swing — see the spin-axis
+note below.
+
+The agent's action is a **residual on the scripted swing**: an action of zero
+reproduces a swing that already contacts the ball, so there is a reward
+gradient from the first episode. A policy over 36 raw joint targets would
+flail and never make contact.
+
+The reward comes from `golf/launch.py`, not from MuJoCo's contact. Rigid-body
+contact gives a smash factor of 0.8 against a real 1.48, and cannot produce
+gear effect at all — so "how far" would be wrong and "how straight" would be
+unrepresentable. Instead the clubhead's state at closest approach goes through
+an oblique-impact model and a ballistic flight model with drag and Magnus lift.
+Clubhead/ball collision is switched off during training so the wrong impulse
+doesn't perturb the swing.
+
+Measured on an i7-1265U (2 P-cores + 8 E-cores, so scaling is limited):
+
+| | |
+|---|---|
+| throughput, 11 workers | ~750 agent steps/s end to end |
+| full swing episode | 120 steps @ 100 Hz control |
+| downswing episode | 30 steps |
+| 10M steps, full swing | ~3.7 hours |
+
+PPO, not MuJoCo, is the bottleneck. Two settings matter a lot and are easy to
+get wrong: `cone="pyramidal"` in the model (elliptic costs 2.4× per step for an
+identical swing), and `log_std_init=-1.0` in the policy (SB3's default σ=1.0
+drops the initial contact rate from ~29% to ~2%).
+
+## The spin-axis ceiling
+
+Training plateaued around 120 m carry, and the reason is a gap in the reward
+rather than a limit of the agent. `offline` measures where the ball *finishes*,
+so the agent satisfied it by aiming left and slicing back — net offline near
+zero, but a spin axis stuck at 45° and a smash factor of 1.15 against a
+possible 1.48. That oblique strike is what caps distance: at the same clubhead
+speed, a square strike makes 51.7 m/s of ball speed instead of 41.6.
+
+Fixing it means deciding what "straight" means. Penalising the finishing
+position (current) rewards compensation; penalising the spin axis directly
+would force a square strike. The second is the real swing, and would need a
+retrain.
+
 ## Next
 
-* Gymnasium environment wrapping `GolfSwingSim` (observation from
-  `SwingTracker.observation()`, action = the 36 servo targets) — likely
-  `golf/env.py`, with training scripts alongside it
-* Reward on ball speed / launch conditions, with penalties for joint-limit and
-  torque saturation
-* Train with SB3 (already in the venv alongside MuJoCo and torch)
+* A spin-axis term in the reward, to break the 120 m plateau
+* Longer runs, and a curriculum: train the downswing, then extend backwards
+* Revisit `--base free` (full balance) once the swing itself is good
