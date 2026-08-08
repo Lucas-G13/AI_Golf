@@ -28,7 +28,7 @@ def build_model_xml(
     club: Club,
     base: str = "feet",
     timestep: float = 2e-4,
-    face_offset_deg: float = 0.0,
+    head_quat: Optional[np.ndarray] = None,
     foot_pins: Optional[Dict[str, np.ndarray]] = None,
     strength: float = 1.0,
     trail_arm_gain: float = 0.12,
@@ -41,8 +41,8 @@ def build_model_xml(
           "free"   pelvis free, nothing pinned: full balance physics
           "pinned" pelvis welded to the world
 
-    `face_offset_deg` and `foot_pins` are measured off a first, provisional
-    build of this same model -- see `GolfSwingSim.__init__`.
+    `head_quat` and `foot_pins` are measured off a first, provisional build of
+    this same model -- see `GolfSwingSim.__init__`.
     """
     a, c = anthro, club
     H = a.height
@@ -84,10 +84,20 @@ def build_model_xml(
     club_pos = palm + c.lead_hand_drop * shaft_up
     q_club = quat_axis((0, -1, 0), g)
 
+    # ---- clubhead ---------------------------------------------------------
+    # The head does NOT inherit the shaft's frame.  A real head sits level on
+    # the turf with the shaft entering the heel at the lie angle, so its frame
+    # is set from the outside: `head_quat` is measured at address such that the
+    # head ends up square to the target and level (x = target line, z = up).
+    # Left as identity on the first build, then solved -- see
+    # `AddressSolver.head_alignment`.
+    q_head = (np.array([1.0, 0.0, 0.0, 0.0]) if head_quat is None
+              else np.asarray(head_quat, dtype=float))
     loft = c.loft_deg * DEG
     face_normal = np.array([math.cos(loft), 0.0, math.sin(loft)])
-    q_face = quat_axis((0, 0, 1), face_offset_deg * DEG)
-    head_ctr = np.array([0.0, 0.045, -0.020])              # toe-ward of the tip
+    # heel is at the shaft tip; the head extends toward the toe, away from the
+    # golfer, and hangs below the tip
+    head_ctr = np.array([0.0, -a.lead_sign * 0.045, -0.025])
     face_ctr = head_ctr + np.array([0.020, 0.0, 0.0])
 
     # ---- legs -------------------------------------------------------------
@@ -135,7 +145,7 @@ def build_model_xml(
             <geom name="shaft_g" type="capsule" size="0.0055"
                   fromto="0 0 -0.26 0 0 {-c.length:.4f}" mass="{c.shaft_mass:.4f}"
                   rgba="0.75 0.76 0.8 1"/>
-            <body name="club_head" pos="0 0 {-c.length:.4f}" quat="{fmt_vec(q_face)}">
+            <body name="club_head" pos="0 0 {-c.length:.4f}" quat="{fmt_vec(q_head)}">
               <geom name="club_head_g" type="box" size="0.020 0.050 0.030"
                     pos="{fmt_vec(head_ctr)}" euler="0 {-c.loft_deg} 0"
                     mass="{c.head_mass:.4f}" class="strike"

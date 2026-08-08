@@ -22,7 +22,7 @@ from .util import DEG
 class AddressSolver:
     """Mixin: everything that happens before the swing starts."""
 
-    def _solve_address(self) -> None:
+    def _solve_address(self, warn: bool = True) -> None:
         """Put the golfer in a self-consistent address position.
 
         1. apply the nominal address angles
@@ -64,7 +64,8 @@ class AddressSolver:
             res = self._solve_trail_arm()
             if res < 5e-3:
                 break
-        if self.verbose and res > 5e-3:
+        self.address_grip_residual = res
+        if warn and self.verbose and res > 5e-3:
             print(f"  [warn] trail hand is {res * 100:.1f} cm off the grip")
 
     def _square_shoulders(self) -> None:
@@ -107,16 +108,38 @@ class AddressSolver:
             out[name] = self.data.site_xpos[sid].copy()
         return out
 
-    def _face_heading_error(self) -> float:
-        """How far the clubface points away from square, in degrees.
+    def head_alignment(self) -> np.ndarray:
+        """Orientation the clubhead should have within the club body.
 
-        Measured on the first build and fed back into the second as a rotation
-        of the head about the shaft, so the face ends up square at address
-        whatever the arms happen to be doing.
+        The head must not simply inherit the shaft's frame.  The shaft comes
+        into a real head at the lie angle, so a head welded square to the shaft
+        ends up tipped ~40 deg with the sole in the air and the mass hanging off
+        the wrong side.  What we actually want is a head that is *level and
+        square to the target at address*, which is world-axis-aligned -- so the
+        rotation it needs relative to the club is just the inverse of the
+        club's own orientation at address.
+
+        Depends on the address pose, which in turn depends on where the head
+        is, so `GolfSwingSim` iterates this a couple of times.
         """
+        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "club")
+        R_club = self.data.xmat[bid].reshape(3, 3)
+        q = np.zeros(4)
+        mujoco.mju_mat2Quat(q, np.ascontiguousarray(R_club.T).ravel())
+        return q
+
+    def face_heading(self) -> float:
+        """How far the clubface points away from square at address, degrees.
+        Positive is open (aiming right of the target for a right-hander)."""
         sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "clubface")
         n = self.data.site_xmat[sid].reshape(3, 3)[:, 2]   # site z = face normal
-        return math.degrees(math.atan2(n[1], n[0]))
+        return math.degrees(math.atan2(n[1], n[0])) * self.anthro.lead_sign
+
+    def face_loft(self) -> float:
+        """Effective loft of the face at address, degrees above horizontal."""
+        sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "clubface")
+        n = self.data.site_xmat[sid].reshape(3, 3)[:, 2]
+        return math.degrees(math.asin(float(np.clip(n[2], -1.0, 1.0))))
 
     def _settle(self, seconds: float) -> None:
         """Hold the solved address pose (which includes the IK'd trail arm) and

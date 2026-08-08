@@ -54,18 +54,29 @@ class GolfSwingSim(IKSolver, AddressSolver, SwingPlanner):
         self.verbose = verbose
         self.strength = strength
 
-        # ---- pass 1: provisional model, used only to measure ---------------
-        self._load(build_model_xml(self.anthro, self.club, base, timestep,
-                                   strength=strength))
-        self._solve_address()
-        self._pins = self._foot_pin_targets() if base == "feet" else None
-        face_err = self._face_heading_error()
-
-        # ---- pass 2: face squared to the target, feet pinned ---------------
-        self._load(build_model_xml(self.anthro, self.club, base, timestep,
-                                   face_offset_deg=-face_err,
-                                   foot_pins=self._pins, strength=strength))
-        self._solve_address()
+        # ---- build until the club sits square and level at address ---------
+        # Each pass measures the address pose, works out how the head has to be
+        # mounted and where the feet ended up, and rebuilds.  It converges in
+        # two or three passes: moving the head moves the clubhead site, which
+        # the address IK aims at, which moves the pose slightly.
+        self._pins = None
+        head_quat = None
+        for attempt in range(4):
+            self._load(build_model_xml(self.anthro, self.club, base, timestep,
+                                       head_quat=head_quat,
+                                       foot_pins=self._pins, strength=strength))
+            self._solve_address(warn=False)
+            if self._pins is None and base == "feet":
+                self._pins = self._foot_pin_targets()
+            if attempt and abs(self.face_heading()) < 0.25:
+                break
+            head_quat = self.head_alignment()
+        if self.verbose:
+            grip = self.address_grip_residual
+            note = (f", trail hand {grip * 100:.1f} cm off the grip"
+                    if grip > 5e-3 else "")
+            print(f"  address: clubface {self.face_heading():+.2f} deg open, "
+                  f"{self.face_loft():.1f} deg loft{note}")
         # The servo targets are the *solved* angles and the stored state is the
         # pose those targets settle into, so the swing starts from a genuine
         # equilibrium instead of twitching on the first step.
