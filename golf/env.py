@@ -66,7 +66,19 @@ class RewardWeights:
     centred: float = 0.5        # hitting the middle of the face
     carry: float = 12.0         # per CARRY_REF metres -- this should dominate
     offline: float = 2.5        # per OFFLINE_REF metres of miss
-    speed: float = 1.5          # dense credit for clubhead speed at the ball
+    # Dense credit for clubhead speed, which was the scaffold that got the
+    # agent swinging hard early on.  Halved now that it does: paid on every
+    # swing whether or not it connects, it was most of what a complete whiff
+    # scored, which narrows the gap between hitting the ball and missing it.
+    speed: float = 0.8
+
+    # Penalising *where the ball finishes* alone is satisfiable by aiming left
+    # and slicing back, which is what the first trained policy did: offline
+    # near zero, but a 46 deg spin axis and a smash factor of 1.15 against a
+    # possible 1.48.  That oblique strike is what caps distance.  This term
+    # prices the curve itself, so the only way to score is to actually deliver
+    # the face square to the path.
+    spin_axis: float = 3.0      # per AXIS_REF degrees of spin-axis tilt
 
     # --- per step: charged ~120 times, so these are 1/10 of what they look ---
     torque: float = 0.002       # effort
@@ -78,6 +90,11 @@ class RewardWeights:
     offline_ref: float = 50.0
     miss_scale: float = 0.10    # a 10 cm miss still scores ~0.37 on contact
     face_scale: float = 0.035   # ~1 face-width of centredness
+    axis_ref: float = 60.0      # degrees of spin axis per unit penalty
+    #: Cap on the spin-axis penalty, in units of `axis_ref`.  It has to be
+    #: capped: uncapped, a wild enough strike scores worse than never touching
+    #: the ball, and the agent learns to avoid it entirely.
+    axis_cap: float = 1.25
 
 
 @dataclass
@@ -346,6 +363,8 @@ class GolfEnv(gym.Env):
             reward += w.centred * float(np.exp(-(offcentre / w.face_scale) ** 2))
             reward += w.carry * flight.carry / w.carry_ref
             reward -= w.offline * abs(flight.lateral) / w.offline_ref
+            reward -= w.spin_axis * min(abs(launch.spin_axis) / w.axis_ref,
+                                        w.axis_cap)
             info.update(contact=1.0, ball_speed=launch.speed,
                         smash=launch.smash, launch_angle=launch.launch_angle,
                         backspin=launch.backspin_rpm,

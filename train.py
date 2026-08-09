@@ -82,7 +82,20 @@ def build_env(args, n_envs: int):
 
     venv = SubprocVecEnv([factory(i) for i in range(n_envs)], start_method="spawn")
     venv = VecMonitor(venv)
+
     # A 260-dim observation mixing radians, metres and m/s badly needs this.
+    # On resume, carry the old statistics over: starting them from scratch
+    # feeds the policy observations on a scale it has never seen, and it swings
+    # badly for the ~150k steps the running means take to converge.
+    if args.resume:
+        stats = Path(args.resume).parent / "vecnormalize.pkl"
+        if stats.exists():
+            venv = VecNormalize.load(str(stats), venv)
+            venv.training = True
+            print(f"  reusing observation statistics from {stats}")
+            return venv
+        print("  [warn] no vecnormalize.pkl beside the checkpoint -- the "
+              "policy will swing badly until fresh statistics converge")
     return VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0,
                         gamma=args.gamma)
 

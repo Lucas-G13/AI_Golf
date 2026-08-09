@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
+import mujoco
 import numpy as np
 
 from .env import GolfEnv
@@ -115,44 +116,83 @@ def report(env: GolfEnv, act: Callable, episodes: int = 20) -> None:
           f"+/- {spread('offline'):.1f}")
 
 
+#: GLFW key codes the viewer hands to `key_callback`.
+_KEY_SPACE, _KEY_ENTER, _KEY_BACKSPACE, _KEY_R = 32, 257, 259, ord("R")
+
+
 def watch(env: GolfEnv, act: Callable, slowmo: float = 0.25,
-          loops: int = 0) -> None:
-    """Play the swing in the interactive viewer, on a loop."""
+          loop: bool = False, flight: float = 1.2) -> None:
+    """Play the swing in the interactive viewer.
+
+    Swings once and then holds the finish, so you can orbit around it, rather
+    than restarting on a loop.  Space, Enter, Backspace or R swings again;
+    `loop=True` restores the old repeat-forever behaviour.
+    """
     import mujoco.viewer
 
     # Put the ball back in the club's way.  Training runs with contact off so
     # the analytic launch model owns impact, but for watching it you want to
     # actually see the ball leave.
     env.enable_ball_contact()
-
     sim = env.sim
-    with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
+    replay = {"go": True}
+
+    def on_key(keycode: int) -> None:
+        if keycode in (_KEY_SPACE, _KEY_ENTER, _KEY_BACKSPACE, _KEY_R):
+            replay["go"] = True
+
+    with mujoco.viewer.launch_passive(sim.model, sim.data,
+                                      key_callback=on_key) as viewer:
         viewer.cam.azimuth, viewer.cam.elevation = 135, -12
         viewer.cam.distance = 4.2
         viewer.cam.lookat[:] = sim.tracker.positions()[
             sim.tracker.index["pelvis"]]
-        n = 0
+
         while viewer.is_running():
+            if not replay["go"]:
+                # Idle on the finished swing: keep the window responsive but
+                # stop advancing physics.
+                viewer.sync()
+                time.sleep(0.02)
+                continue
+            replay["go"] = loop
+
             obs, _ = env.reset()
             wall0 = time.time()
+            info: Dict = {}
             done = False
             while viewer.is_running() and not done:
                 obs, _, terminated, truncated, info = env.step(act(obs))
                 done = terminated or truncated
-                lag = wall0 + sim.data.time / max(slowmo, 1e-3) - time.time()
-                if lag > 0.001:
-                    viewer.sync()
-                    time.sleep(min(lag, 0.02))
-            if info.get("contact"):
-                print(f"  {info['clubhead_speed']:.1f} m/s -> "
-                      f"{info['ball_speed']:.1f} m/s ball, "
-                      f"{info['carry']:.0f} m carry, "
-                      f"{info['offline']:+.0f} m offline")
-            else:
-                print(f"  missed by {info.get('miss', float('nan')) * 100:.0f} cm")
-            n += 1
-            if loops and n >= loops:
-                break
+                _pace(viewer, sim, wall0, slowmo)
+
+            # Let the ball actually get somewhere before freezing the frame.
+            end = sim.data.time + flight
+            while viewer.is_running() and sim.data.time < end:
+                mujoco.mj_step(sim.model, sim.data)
+                _pace(viewer, sim, wall0, slowmo)
+
+            _print_shot(info)
+            if not loop:
+                print("  [space] swing again, [Esc] quit")
+
+
+def _pace(viewer, sim, wall0: float, slowmo: float) -> None:
+    """Hold the sim to wall-clock time, played back in slow motion."""
+    lag = wall0 + sim.data.time / max(slowmo, 1e-3) - time.time()
+    if lag > 0.001:
+        viewer.sync()
+        time.sleep(min(lag, 0.02))
+
+
+def _print_shot(info: Dict) -> None:
+    if info.get("contact"):
+        print(f"  {info['clubhead_speed']:.1f} m/s -> "
+              f"{info['ball_speed']:.1f} m/s ball, "
+              f"{info['carry']:.0f} m carry, "
+              f"{info['offline']:+.0f} m offline")
+    else:
+        print(f"  missed by {info.get('miss', float('nan')) * 100:.0f} cm")
 
 
 def contact_sheet(env: GolfEnv, act: Callable, path: str) -> None:

@@ -71,6 +71,9 @@ def parse_args() -> argparse.Namespace:
     out = ap.add_argument_group("output")
     out.add_argument("--slowmo", type=float, default=0.25,
                      help="viewer playback rate (0.25 = quarter speed)")
+    out.add_argument("--loop", action="store_true",
+                     help="repeat the swing forever instead of holding the "
+                          "finish until you press space")
     out.add_argument("--no-view", action="store_true", help="run headless")
     out.add_argument("--report", action="store_true",
                      help="print the kinematic report (implies --no-view)")
@@ -98,8 +101,9 @@ def play_learned(args, anthro: Anthropometry, club: Club) -> None:
     elif args.report or args.no_view:
         report(env, act, episodes=args.episodes)
     else:
-        print("\nviewer -- drag to orbit, scroll to zoom, Esc to quit")
-        watch(env, act, slowmo=args.slowmo)
+        print("\nviewer -- drag to orbit, scroll to zoom, space to swing "
+              "again, Esc to quit")
+        watch(env, act, slowmo=args.slowmo, loop=args.loop)
 
 
 def main() -> None:
@@ -135,8 +139,9 @@ def main() -> None:
         if args.csv:
             print(f"\n  wrote {args.csv}")
     else:
-        print("\nopening viewer -- drag to orbit, scroll to zoom, Esc to quit")
-        view_swing(sim, slowmo=args.slowmo)
+        print("\nviewer -- drag to orbit, scroll to zoom, space to swing "
+              "again, Esc to quit")
+        view_swing(sim, slowmo=args.slowmo, loop=args.loop)
 
 
 if __name__ == "__main__":

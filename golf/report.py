@@ -80,33 +80,53 @@ def run_swing(sim: GolfSwingSim, csv_path: Optional[str] = None
     return rows, names, impact
 
 
-def view_swing(sim: GolfSwingSim, slowmo: float = 0.25, loops: int = 0) -> None:
-    """Open the interactive viewer and loop the swing in slow motion."""
+#: GLFW key codes the viewer hands to `key_callback`.
+_REPLAY_KEYS = (32, 257, 259, ord("R"))     # space, enter, backspace, R
+
+
+def view_swing(sim: GolfSwingSim, slowmo: float = 0.25,
+               loop: bool = False) -> None:
+    """Open the interactive viewer and play the swing in slow motion.
+
+    Plays once and holds the finish so you can look around it.  Space, Enter,
+    Backspace or R swings again; `loop=True` repeats forever.
+    """
     import mujoco.viewer
 
-    with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
+    replay = {"go": True}
+
+    def on_key(keycode: int) -> None:
+        if keycode in _REPLAY_KEYS:
+            replay["go"] = True
+
+    with mujoco.viewer.launch_passive(sim.model, sim.data,
+                                      key_callback=on_key) as viewer:
         viewer.cam.azimuth = 135
         viewer.cam.elevation = -12
         viewer.cam.distance = 4.2
         viewer.cam.lookat[:] = sim.tracker.positions()[
             sim.tracker.index["pelvis"]]
-        n = 0
-        sim.reset()
         wall0 = time.time()
+
         while viewer.is_running():
-            if sim.data.time > sim.duration + 0.6:
-                n += 1
-                if loops and n >= loops:
-                    break
-                sim.reset()
-                wall0 = time.time()
-            sim.step()
-            # sync at ~60 Hz of wall clock, played back in slow motion
-            target_wall = wall0 + sim.data.time / max(slowmo, 1e-3)
-            lag = target_wall - time.time()
-            if lag > 0.001:
+            if not replay["go"]:
+                # idle on the finished swing without advancing physics
                 viewer.sync()
-                time.sleep(min(lag, 0.02))
+                time.sleep(0.02)
+                continue
+            replay["go"] = loop
+            sim.reset()
+            wall0 = time.time()
+
+            while viewer.is_running() and sim.data.time <= sim.duration + 0.6:
+                sim.step()
+                # sync at ~60 Hz of wall clock, played back in slow motion
+                lag = wall0 + sim.data.time / max(slowmo, 1e-3) - time.time()
+                if lag > 0.001:
+                    viewer.sync()
+                    time.sleep(min(lag, 0.02))
+            if not loop:
+                print("  [space] swing again, [Esc] quit")
 
 
 # ===========================================================================

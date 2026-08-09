@@ -18,6 +18,10 @@ python main.py --csv swing.csv  # log every tracked joint every 2 ms
 python main.py --xml golf.xml   # dump the generated MJCF
 ```
 
+**Viewer controls:** the swing plays once and then holds the finish so you can
+orbit around it. Space (or Enter / Backspace / R) swings again, Esc quits, and
+`--loop` restores repeat-forever if you want it running unattended.
+
 ## Layout
 
 | file | what's in it |
@@ -104,20 +108,22 @@ python main.py --policy runs/golf --frames swing.png   # contact sheet
 python main.py --policy reference --report             # the scripted swing
 ```
 
-Results after 3.3M steps (~50 min on the machine below), against the scripted
-swing it started from:
+Two policies were trained, differing only in whether the reward priced the
+*curve* or only where the ball finished (40 swings each, stochastic):
 
-| | scripted | learned |
-| --- | --- | --- |
-| clubhead speed | 18.2 m/s | **36.1 m/s** |
-| ball speed | 20.3 m/s | 41.6 m/s |
-| launch angle | −5.6° | 21.9° |
-| carry | 0.4 m | **115 m** |
-| contact | — | 27/30 swings |
+| | scripted | offline only | **+ spin axis** |
+| --- | --- | --- | --- |
+| clubhead speed | 18.2 m/s | 35.8 m/s | **38.9 m/s** |
+| ball speed | 20.3 m/s | 41.0 m/s | **47.0 m/s** |
+| smash factor | 1.11 | 1.14 | **1.21** |
+| spin axis | +36° | +46° | **+28°** |
+| carry | 0.4 m | 112 m | **149 m** |
+| offline | −0.3 m | +9.9 m | **−4.8 m** |
+| contact | — | 36/40 | **40/40** |
 
-The scripted swing chops 29° down and drills the ball into the turf; the agent
-learned to hit up on it. It is still not a good golf swing — see the spin-axis
-note below.
+The scripted swing chops 29° down and drills the ball into the turf; both
+agents learned to hit up on it. The difference between the two columns is
+entirely the reward — see below.
 
 The agent's action is a **residual on the scripted swing**: an action of zero
 reproduces a swing that already contacts the ball, so there is a reward
@@ -146,22 +152,46 @@ get wrong: `cone="pyramidal"` in the model (elliptic costs 2.4× per step for an
 identical swing), and `log_std_init=-1.0` in the policy (SB3's default σ=1.0
 drops the initial contact rate from ~29% to ~2%).
 
-## The spin-axis ceiling
+## What the reward measures is what you get
 
-Training plateaued around 120 m carry, and the reason is a gap in the reward
-rather than a limit of the agent. `offline` measures where the ball *finishes*,
-so the agent satisfied it by aiming left and slicing back — net offline near
-zero, but a spin axis stuck at 45° and a smash factor of 1.15 against a
-possible 1.48. That oblique strike is what caps distance: at the same clubhead
-speed, a square strike makes 51.7 m/s of ball speed instead of 41.6.
+The first policy plateaued at ~115 m and would not move. The cause was a gap in
+the reward, not a limit of the agent: `offline` measures where the ball
+*finishes*, so the agent satisfied it by aiming left and slicing back. Net
+offline near zero — and a spin axis stuck at 46° with a smash factor of 1.14
+against a possible 1.48. That oblique strike is what capped distance.
 
-Fixing it means deciding what "straight" means. Penalising the finishing
-position (current) rewards compensation; penalising the spin axis directly
-would force a square strike. The second is the real swing, and would need a
-retrain.
+Adding a term that prices the *curve itself* rather than the finishing position
+broke the plateau within 450k steps: axis 46° → 30°, smash 1.14 → 1.28, carry
+112 → 149 m, at essentially the same clubhead speed. Nothing about the physics
+or the agent changed. Only the question being asked.
+
+Two details in that term matter:
+
+* **It must be capped.** Uncapped, a wild enough strike scores worse than never
+  touching the ball, and the agent learns to avoid it.
+* **`axis_ref` is 60°, not 30°.** A tighter reference saturates the penalty
+  below the 46° the policy actually sat at, leaving no gradient exactly where
+  it was needed.
+
+The same lesson bit twice. An earlier weighting charged per-step torque costs
+that accumulated to ~4.8 over an episode while the carry being achieved paid
+0.07 — so the agent halved its clubhead speed to bunt the ball, and reward rose
+the whole time. `RewardWeights` carries both stories in its docstring. There is
+a ranking check in the repo history worth re-running whenever the weights
+change: a complete miss must score below every strike, and the ranking must be
+monotonic in both squareness and speed.
+
+## Where it stopped
+
+38.9 m/s, smash 1.21, spin axis 28°, carry 149 m, 40/40 contact. Still short of
+a real driver (45 m/s, smash 1.48, 220 m). The axis stalled around 28° rather
+than reaching single digits, most likely because the policy is a *residual* on
+a scripted swing whose path is 56° out-to-in — ±20° per joint may not be enough
+authority to re-route the swing plane.
 
 ## Next
 
-* A spin-axis term in the reward, to break the 120 m plateau
-* Longer runs, and a curriculum: train the downswing, then extend backwards
+* Raise `--residual` from 0.35 to ~0.6 so the policy can leave the reference's
+  swing plane, and see if the axis breaks under 20°
+* A curriculum: train the downswing, then extend backwards to address
 * Revisit `--base free` (full balance) once the swing itself is good
