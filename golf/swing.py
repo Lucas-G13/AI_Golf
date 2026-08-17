@@ -86,6 +86,17 @@ def swing_script(anthro: Anthropometry, base: Dict[str, float],
               P(lumbar_turn=-13, thorax_turn=-48,
                 thorax_bend=-10, neck_rot=-22,
                 **arm(s_flex + 30, s_abd - 32, 38, e_flex + 12, 52)), -30),
+        # Delivery -- the "slot".  The arms drop while the chest stays closed,
+        # so the club falls onto a shallower plane and approaches from inside
+        # the target line.  Without this the body simply unwinds and drags the
+        # club around with it: 64 deg out-to-in and 32 deg of descent, which is
+        # a chop, and no amount of residual authority fixes a plane the
+        # reference does not have.  The lead arm here is solved by IK against a
+        # point behind and inside the ball (see SwingPlanner.plan_lead_arm).
+        Phase("delivery", 1.02,
+              P(lumbar_turn=-11, thorax_turn=-44,
+                thorax_bend=-14, lumbar_bend=-8, neck_rot=-18,
+                **arm(s_flex + 12, s_abd - 26, 30, e_flex + 10, 50)), 12),
         # The shoulder turn is the sum of all three turns, so at impact the
         # hips are 42 deg open but the chest only ~17 -- the negative X-factor
         # a real golfer has at impact.  The lead arm comes back to its address

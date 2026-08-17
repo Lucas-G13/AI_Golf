@@ -41,7 +41,9 @@ orbit around it. Space (or Enter / Backspace / R) swings again, Esc quits, and
 | `golf/report.py` | running a swing, logging it, showing it |
 | `golf/launch.py` | impact → launch conditions → carry and curve |
 | `golf/env.py` | `GolfEnv` — the Gymnasium environment |
+| `golf/top.py` | the top of the backswing: the handover both halves share |
 | `train.py` | PPO training |
+| `find_top.py` | searching for the top to hand over at |
 
 `GolfSwingSim` is composed from the `ik`, `posture` and `planner` mixins: three
 separate concerns, one object, because they all work on the same model.
@@ -99,6 +101,14 @@ python train.py --start transition   # downswing only, ~4x faster
 python train.py --steps 20000000 --resume runs/golf/final.zip
 ```
 
+Or train the two halves separately, either side of a fixed handover:
+
+```bash
+python find_top.py                                     # choose the top
+python train.py --stage downswing --out runs/downswing
+python train.py --stage backswing --out runs/backswing
+```
+
 Then watch what it learned:
 
 ```bash
@@ -106,6 +116,8 @@ python main.py --policy runs/golf                      # 3D viewer
 python main.py --policy runs/golf --report --episodes 50
 python main.py --policy runs/golf --frames swing.png   # contact sheet
 python main.py --policy reference --report             # the scripted swing
+python main.py --downswing runs/downswing --report     # the downswing alone
+python main.py --backswing runs/backswing --downswing runs/downswing --report
 ```
 
 Two policies were trained, differing only in whether the reward priced the
@@ -181,17 +193,135 @@ a ranking check in the repo history worth re-running whenever the weights
 change: a complete miss must score below every strike, and the ranking must be
 monotonic in both squareness and speed.
 
+It bit a third time, on backspin. The flight model caps lift but holds
+`DRAG_COEFF` constant, so a ball at 4600 rpm balloons in reality and costs
+nothing here — and the downswing duly settled at 4640 rpm, 7-iron spin off a
+driver, because nothing said otherwise. The penalty that fixed it is standing
+in for physics `golf/launch.py` does not have, not for taste. Re-running the
+ranking check caught the cap mis-sized on the first attempt: at `spin_cap`
+1.25, a wild strike (40° axis, 6000 rpm, 120 m) scored +1.32 against +1.27 for
+a 10 cm miss — 0.05 of margin between "hit it badly" and "don't hit it". The
+fix was to tighten the *cap* rather than the rate, which bounds the worst case
+without touching the gradient at the 4640 rpm the swing actually produced.
+
+## Splitting the swing at the top
+
+The two halves can be trained separately, which only means anything if they
+agree on where one ends and the other begins. That agreement is `golf/top.py`:
+one `TopState` in `runs/top.npz` that the downswing resets to and the backswing
+is paid for reaching. Both stages re-plan the reference around it, so "the top"
+means the same thing on both sides; change it and both policies are stale.
+
+The top is searched, not written down — ten parameters (pelvis, lumbar and
+thorax turn, trunk bend, lead arm) optimised by CEM against the same carry and
+straightness the downswing is paid for. It chose **less coil and more arm**:
+shoulder turn −100° → −86°, lead-arm abduction −34° → −40°, shoulder rotation
+40° → 15°. The scripted swing from that top carries 53 m against 28 m from the
+hand-written one.
+
+The downswing is where the reward varies, and it went a long way:
+
+| | full swing, one policy | **downswing from the searched top** |
+| --- | --- | --- |
+| clubhead speed | 38.9 m/s | **51.2 m/s** |
+| ball speed | 47.0 m/s | **72.8 m/s** |
+| smash factor | 1.21 | **1.42** |
+| backspin | — | **2990 rpm** |
+| spin axis | +28° | **−0.9°** |
+| carry | 149 m | **244 m** |
+| contact | 40/40 | 39/40 |
+
+Not a like-for-like comparison: this policy is handed a good top for free.
+
+The backspin penalty did its work through the mechanism it was supposed to.
+The swing that spun 4640 rpm came in at −1.2° of attack; the one that spins
+2990 comes in at **+3.4°** — it learned to hit *up* on a teed driver, which is
+where the spin went. Club path tightened from +9.1° to +3.2° on the way, and
+carry rose rather than fell, so the distance-for-spin trade the reward allowed
+for (up to 42 m) never had to be paid.
+
+### The handover is about momentum, not position
+
+Composing the two halves is where the interesting failure lives. The first
+trained backswing arrived at 2.3° and 3.1 cm — *better* clubhead accuracy than
+the reference's 3.3 cm — and made the composed swing **worse than not training
+a backswing at all**: 199 m and 17/30 against the reference backswing's 235 m
+and 29/30.
+
+Injecting each kind of error into the canonical top separates the cause:
+
+| error injected at the top | contact | spin axis | carry |
+| --- | --- | --- | --- |
+| none | 29/30 | −0.5° | 246 m |
+| pose, 2.3° RMS | 29/30 | −1.1° | 239 m |
+| **velocity, 2.0 rad/s RMS** | **18/30** | **+23°** | **190 m** |
+
+Pose error is nearly free; velocity error is ruinous. The handover reward had
+it exactly backwards — `top_still` 2.0 at `vel_ref` 4.0 priced 2.1 rad/s at
+about 1.0, against 10.0 available for pose and clubhead. The policy bought
+0.2 cm of club accuracy and paid 2 rad/s of momentum for it. It was trained to
+do that.
+
+Two things follow, both now in `RewardWeights`:
+
+* **Weight the handover by what it costs the shot.** Velocity is ~8× more
+  expensive than pose, so it is weighted that way (`top_still` 8.0 against
+  `top_pose` 3.0), not by which is easier to measure.
+* **An arrival test that ignores velocity will lie to you.** `top_reached`
+  originally checked 8° and 20 cm and reported 100% arrival while the composed
+  swing was losing 35 m and half its strikes.
+
+### Don't train the backswing
+
+Reweighted and retrained for another 5M steps, the backswing moved the way it
+was told — velocity error 2.11 → 1.69 rad/s, paid for out of pose — and was
+still comprehensively beaten by not training it at all:
+
+| backswing | angle | club | velocity | composed carry | contact |
+| --- | --- | --- | --- | --- | --- |
+| **scripted (zero action)** | **0.35°** | **3.3 cm** | **0.17 rad/s** | **244 m** | **28/30** |
+| trained, deterministic | 4.56° | 11.4 cm | 0.57 rad/s | 202 m | 27/30 |
+| trained, stochastic | 4.79° | 6.7 cm | 1.69 rad/s | 206 m | 23/30 |
+
+The reason is structural, and worth knowing before repeating the experiment.
+The optimum of this task *is* the zero action, which the reference already
+supplies for free, so the best a policy can do is learn to stop interfering —
+and after 5M steps it still emits a mean action of 0.29, about 6° of joint
+target. Terminal-only reward over 82-step episodes is ~61k episodes in 5M
+steps, nowhere near enough to drive a 36-dimensional policy onto exactly zero,
+and `ent_coef` is actively paying it not to. The one thing a trained backswing
+could add over the script is disturbance rejection, and the position servos
+already do that themselves: 15° and 2 rad/s of perturbation at address still
+arrives 0.79° and 12.6 cm from the top.
+
+So the swing to use is the scripted backswing with the trained downswing:
+
+```bash
+python main.py --backswing reference --downswing runs/downswing --report
+```
+
+The split earns its keep entirely on the downswing side. Being able to *start*
+from a good top is what made the downswing trainable; learning to *reach* one
+was not worth the compute.
+
 ## Where it stopped
 
-38.9 m/s, smash 1.21, spin axis 28°, carry 149 m, 40/40 contact. Still short of
-a real driver (45 m/s, smash 1.48, 220 m). The axis stalled around 28° rather
-than reaching single digits, most likely because the policy is a *residual* on
-a scripted swing whose path is 56° out-to-in — ±20° per joint may not be enough
-authority to re-route the swing plane.
+Full swing, scripted backswing into the trained downswing, 40 stochastic
+swings: **51.2 m/s, smash 1.42, spin axis −2.5°, carry 242.6 m, 39/40**, off a
+handover that arrives 0.4° and 3 cm from the canonical top. A real driver is
+45 m/s, smash 1.48, ~2500 rpm, 220 m. The kinematics hold up too:
++3.4° attack, +3.2° club path, hips 39° open against shoulders square, and 55°
+of wrist cock still held into impact. The remaining gap is not distance any
+more, it is **dispersion**: offline scatters ±43 m even with the mean within
+3 m of straight, and the reward prices the average shot with nothing paying for
+consistency.
 
 ## Next
 
+* Price dispersion, not just the mean shot — the swing is long and straight on
+  average and wild individually
+* Train the downswing against a realistic handover (larger `--vel-jitter`)
+  rather than only the exact canonical top
 * Raise `--residual` from 0.35 to ~0.6 so the policy can leave the reference's
-  swing plane, and see if the axis breaks under 20°
-* A curriculum: train the downswing, then extend backwards to address
+  swing plane
 * Revisit `--base free` (full balance) once the swing itself is good

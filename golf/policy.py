@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional, Tuple
 
 import mujoco
 import numpy as np
@@ -69,8 +69,8 @@ def scripted_swing(env: GolfEnv) -> Callable[[np.ndarray], np.ndarray]:
     return lambda _obs: zero
 
 
-def run_episode(env: GolfEnv, act: Callable) -> Dict:
-    obs, _ = env.reset()
+def run_episode(env: GolfEnv, act: Callable, keep_state: bool = False) -> Dict:
+    obs, _ = env.reset(options={"keep_state": True} if keep_state else None)
     info: Dict = {}
     done = False
     while not done:
@@ -79,9 +79,32 @@ def run_episode(env: GolfEnv, act: Callable) -> Dict:
     return info
 
 
-def report(env: GolfEnv, act: Callable, episodes: int = 20) -> None:
+def run_composed(back_env: GolfEnv, back_act: Callable,
+                 down_env: GolfEnv, down_act: Callable) -> Dict:
+    """Swing the backswing policy to the top, then the downswing policy on.
+
+    Two environments over one simulator, rather than one environment that
+    switches policies halfway.  They have to be separate because each policy
+    reads a `phase` input that runs 0 -> 1 across *its own* episode and was
+    normalised against its own statistics; run them both inside a single
+    address-to-impact episode and each sees a phase signal it never trained
+    against.  The handover is `keep_state`: the downswing starts from the body
+    the backswing actually delivered, not from the canonical top.
+
+    The returned info is the shot, with the backswing's handover error folded
+    in so a bad join is visible in the same place as a bad strike.
+    """
+    top = run_episode(back_env, back_act)
+    shot = run_episode(down_env, down_act, keep_state=True)
+    return {**shot, **{f"handover_{k.removeprefix('top_')}": v
+                       for k, v in top.items() if k.startswith("top_")}}
+
+
+def report(env: GolfEnv, act: Callable, episodes: int = 20,
+           rows: Optional[List[Dict]] = None) -> None:
     """Average the shot over several swings and print it like a launch monitor."""
-    rows = [run_episode(env, act) for _ in range(episodes)]
+    if rows is None:
+        rows = [run_episode(env, act) for _ in range(episodes)]
     hits = [r for r in rows if r.get("contact")]
     rule = "=" * 74
     print()
@@ -115,6 +138,13 @@ def report(env: GolfEnv, act: Callable, episodes: int = 20) -> None:
     print(f"  offline         {mean('offline'):+6.1f} m     "
           f"+/- {spread('offline'):.1f}")
 
+    if any("handover_angle_err" in r for r in rows):
+        reached = float(np.mean([r.get("handover_reached", 0.0) for r in rows]))
+        print(f"\n  handover        {reached * 100:.0f}% arrived at the top   "
+              f"({np.mean([r['handover_angle_err'] for r in rows]):.1f} deg "
+              f"RMS, {np.mean([r['handover_club_err'] for r in rows]) * 100:.0f}"
+              f" cm of club)")
+
 
 #: GLFW key codes the viewer hands to `key_callback`.
 _KEY_SPACE, _KEY_ENTER, _KEY_BACKSPACE, _KEY_R = 32, 257, 259, ord("R")
@@ -122,19 +152,30 @@ _KEY_SPACE, _KEY_ENTER, _KEY_BACKSPACE, _KEY_R = 32, 257, 259, ord("R")
 
 def watch(env: GolfEnv, act: Callable, slowmo: float = 0.25,
           loop: bool = False, flight: float = 1.2) -> None:
-    """Play the swing in the interactive viewer.
+    """Play the swing in the interactive viewer."""
+    watch_stages([(env, act)], slowmo=slowmo, loop=loop, flight=flight)
+
+
+def watch_stages(stages: List[Tuple[GolfEnv, Callable]],
+                 slowmo: float = 0.25, loop: bool = False,
+                 flight: float = 1.2) -> None:
+    """Play consecutive episodes as one continuous swing in the viewer.
 
     Swings once and then holds the finish, so you can orbit around it, rather
     than restarting on a loop.  Space, Enter, Backspace or R swings again;
     `loop=True` restores the old repeat-forever behaviour.
+
+    Several stages are how the split swing is watched: each hands over with
+    `keep_state`, so the clock and the body run straight through the top
+    instead of resetting, and what you see is one swing rather than two.
     """
     import mujoco.viewer
 
-    # Put the ball back in the club's way.  Training runs with contact off so
-    # the analytic launch model owns impact, but for watching it you want to
-    # actually see the ball leave.
-    env.enable_ball_contact()
-    sim = env.sim
+    # The ball is made solid part-way into the swing rather than up front --
+    # see `GolfEnv.club_clear_of_ball`.  Training runs with contact off so the
+    # analytic launch model owns impact, but for watching it you want to see
+    # the ball actually leave.
+    sim = stages[0][0].sim
     replay = {"go": True}
 
     def on_key(keycode: int) -> None:
@@ -157,14 +198,23 @@ def watch(env: GolfEnv, act: Callable, slowmo: float = 0.25,
                 continue
             replay["go"] = loop
 
-            obs, _ = env.reset()
+            # Off again for the replay: the club is back at address, back on
+            # top of the ball.
+            stages[0][0].disable_ball_contact()
+            armed = False
             wall0 = time.time()
             info: Dict = {}
-            done = False
-            while viewer.is_running() and not done:
-                obs, _, terminated, truncated, info = env.step(act(obs))
-                done = terminated or truncated
-                _pace(viewer, sim, wall0, slowmo)
+            for i, (env, act) in enumerate(stages):
+                obs, _ = env.reset(
+                    options={"keep_state": True} if i else None)
+                done = False
+                while viewer.is_running() and not done:
+                    obs, _, terminated, truncated, info = env.step(act(obs))
+                    done = terminated or truncated
+                    if not armed and env.club_clear_of_ball():
+                        env.enable_ball_contact()
+                        armed = True
+                    _pace(viewer, sim, wall0, slowmo)
 
             # Let the ball actually get somewhere before freezing the frame.
             end = sim.data.time + flight
@@ -197,11 +247,18 @@ def _print_shot(info: Dict) -> None:
 
 def contact_sheet(env: GolfEnv, act: Callable, path: str) -> None:
     """Write a strip of the swing's phases to a PNG."""
+    contact_sheet_stages([(env, act)], path)
+
+
+def contact_sheet_stages(stages: List[Tuple[GolfEnv, Callable]],
+                         path: str) -> None:
+    """Write a strip of the swing's phases to a PNG, across all stages."""
     import mujoco
     from PIL import Image
 
-    env.enable_ball_contact()
-    sim = env.sim
+    stages[0][0].disable_ball_contact()
+    armed = False
+    sim = stages[0][0].sim
     times = {p.name: p.time for p in sim.controller.phases}
     renderer = mujoco.Renderer(sim.model, height=520, width=420)
     cam = mujoco.MjvCamera()
@@ -209,18 +266,22 @@ def contact_sheet(env: GolfEnv, act: Callable, path: str) -> None:
     cam.lookat[:] = [0.2, 0.3, 1.0]
     cam.distance, cam.elevation, cam.azimuth = 4.0, -8, 90
 
-    obs, _ = env.reset()
     frames: List[np.ndarray] = []
     seen: set = set()
-    done = False
-    while not done:
-        for name, t in times.items():
-            if name not in seen and sim.data.time >= t:
-                renderer.update_scene(sim.data, cam)
-                frames.append(renderer.render().copy())
-                seen.add(name)
-        obs, _, terminated, truncated, _ = env.step(act(obs))
-        done = terminated or truncated
+    for i, (env, act) in enumerate(stages):
+        obs, _ = env.reset(options={"keep_state": True} if i else None)
+        done = False
+        while not done:
+            for name, t in times.items():
+                if name not in seen and sim.data.time >= t:
+                    renderer.update_scene(sim.data, cam)
+                    frames.append(renderer.render().copy())
+                    seen.add(name)
+            obs, _, terminated, truncated, _ = env.step(act(obs))
+            done = terminated or truncated
+            if not armed and env.club_clear_of_ball():
+                env.enable_ball_contact()
+                armed = True
 
     Image.fromarray(np.concatenate(frames, axis=1)).save(path)
     print(f"  wrote {path} ({len(frames)} frames)")

@@ -61,6 +61,16 @@ def parse_args() -> argparse.Namespace:
     learned = ap.add_argument_group("trained policy")
     learned.add_argument("--policy", default=None,
                          help="play a swing trained by train.py, e.g. runs/golf")
+    learned.add_argument("--backswing", default=None,
+                         help="policy for address->top; with --downswing, "
+                              "plays the two halves as one swing.  'reference' "
+                              "uses the scripted backswing, which is the best "
+                              "one there is -- see README")
+    learned.add_argument("--downswing", default=None,
+                         help="policy for top->impact.  On its own, plays the "
+                              "downswing from the canonical top")
+    learned.add_argument("--top", default="runs/top.npz",
+                         help="the handover state the halves agree on")
     learned.add_argument("--episodes", type=int, default=20,
                          help="swings to average over with --policy --report")
     learned.add_argument("--frames", default=None,
@@ -106,12 +116,74 @@ def play_learned(args, anthro: Anthropometry, club: Club) -> None:
         watch(env, act, slowmo=args.slowmo, loop=args.loop)
 
 
+def play_split(args, anthro: Anthropometry, club: Club) -> None:
+    """The separately trained halves, joined at the top.
+
+    One simulator, two environments over it -- see `policy.run_composed` for
+    why they cannot be a single episode.  With only `--downswing` the backswing
+    is skipped entirely and the swing starts from the canonical handover, which
+    is what the downswing was trained against and so measures it in isolation.
+    """
+    from golf.policy import (contact_sheet_stages, report, run_composed,
+                             run_episode, scripted_swing, watch_stages)
+    from golf.top import TopState
+
+    top = TopState.load(args.top)
+    sim = GolfSwingSim(anthro, club, base=args.base, timestep=4e-4,
+                       verbose=False)
+    # Built before the backswing env, and it matters: the first environment
+    # over a sim is the one that caches the ball's real contact flags.
+    down_env = GolfEnv(sim=sim, episode=EpisodeSpec(start="top", end="impact"),
+                       top=top, objective="shot")
+    down = TrainedSwing(args.downswing, down_env)
+    down.deterministic = not args.stochastic
+
+    stages = []
+    what = ""
+    if args.backswing:
+        back_env = GolfEnv(sim=sim, top=top, objective="top",
+                           episode=EpisodeSpec(start="address", end="top",
+                                               follow_through=0.0))
+        if args.backswing == "reference":
+            act, what = scripted_swing(back_env), "the scripted backswing"
+        else:
+            back = TrainedSwing(args.backswing, back_env)
+            back.deterministic = not args.stochastic
+            act, what = back.act, str(back)
+        stages.append((back_env, act))
+        what += "\n     then "
+    else:
+        what = "from the canonical top, "
+    stages.append((down_env, down.act))
+    print(f"playing: {what}{down}")
+
+    if args.frames:
+        contact_sheet_stages(stages, args.frames)
+    elif args.report or args.no_view:
+        if len(stages) == 1:
+            rows = [run_episode(down_env, down.act)
+                    for _ in range(args.episodes)]
+        else:
+            rows = [run_composed(stages[0][0], stages[0][1], down_env,
+                                 down.act) for _ in range(args.episodes)]
+        report(down_env, down.act, rows=rows)
+    else:
+        print("\nviewer -- drag to orbit, scroll to zoom, space to swing "
+              "again, Esc to quit")
+        watch_stages(stages, slowmo=args.slowmo, loop=args.loop)
+
+
 def main() -> None:
     args = parse_args()
 
     anthro = Anthropometry(height=args.height, mass=args.mass,
                            handedness=args.hand)
     club = Club(length=args.club_length)
+
+    if args.downswing:
+        print("building model ...")
+        play_split(args, anthro, club)
+        return
 
     if args.policy:
         print("building model ...")

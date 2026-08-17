@@ -53,6 +53,11 @@ class GolfSwingSim(IKSolver, AddressSolver, SwingPlanner):
         self.timestep = timestep
         self.verbose = verbose
         self.strength = strength
+        # Kept so the script can be rebuilt from scratch later -- `golf.top`
+        # re-plans the whole swing around a different top, and has to reproduce
+        # exactly what the constructor would have built.
+        self.tempo = tempo
+        self.lead = lead
 
         # ---- build until the club sits square and level at address ---------
         # Each pass measures the address pose, works out how the head has to be
